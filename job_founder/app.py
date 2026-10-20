@@ -233,7 +233,7 @@ class JobFounderWindow(QMainWindow):
         head.addLayout(title_col)
         head.addStretch()
         self.import_button = QPushButton("＋  Importer un CV")
-        self.import_button.clicked.connect(self.import_cv)
+        self.import_button.clicked.connect(lambda _checked=False: self.import_cv())
         head.addWidget(self.import_button)
         layout.addLayout(head)
 
@@ -469,6 +469,9 @@ class JobFounderWindow(QMainWindow):
         self.log_text.setText("  ·  ".join(self.activity_log[-2:]))
 
     def import_cv(self, path=None):
+        # QPushButton.clicked emits a bool; never mistake it for a file path.
+        if isinstance(path, bool):
+            path = None
         if path is None:
             selected, _ = QFileDialog.getOpenFileName(self, "Importer un CV", str(Path.home()), "CV (*.pdf *.docx *.txt *.png *.jpg *.jpeg)")
             if not selected: return
