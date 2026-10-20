@@ -7,8 +7,8 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QFont
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent, QFont, QUrl
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
@@ -48,6 +48,23 @@ QTableWidget { border: none; background: white; gridline-color: #edf0f5; selecti
 QHeaderView::section { background: #f8fafc; color: #8290a4; padding: 9px 6px; border: none; border-bottom: 1px solid #e9edf3; font-size: 10px; font-weight: 750; }
 QCheckBox { color: #53647d; spacing: 6px; }
 """
+
+
+class SearchWorker(QThread):
+    completed = Signal(object, object)
+
+    def __init__(self, source_lines: list[str], profile: dict, parent=None):
+        super().__init__(parent)
+        self.source_lines = source_lines
+        self.profile = profile
+
+    def run(self):
+        try:
+            from .sources import search_configured_sources
+            jobs, errors = search_configured_sources(self.source_lines, self.profile)
+            self.completed.emit(jobs, errors)
+        except Exception as exc:
+            self.completed.emit([], [str(exc)])
 
 
 class PageAnalysisWorker(QThread):
@@ -136,6 +153,41 @@ class ResumeDialog(QDialog):
         return {"file": str(self.filepath), "name": self.name.text(), "email": self.email.text(), "phone": self.phone.text(), "city": self.city.currentText(), "skills": self.skills.toPlainText(), "experience": self.experience.text(), "radius": self.radius.value()}
 
 
+class SourcesDialog(QDialog):
+    def __init__(self, sources: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sources d’offres autorisées")
+        self.resize(560, 430)
+        layout = QVBoxLayout(self)
+        layout.addWidget(label("Connecter des pages carrières officielles", "pageTitle"))
+        layout.addWidget(label(
+            "Une source par ligne. Aucun identifiant ni mot de passe n’est demandé. "
+            "Les annonces sont lues via les API publiques des tableaux Greenhouse/Lever.", "muted"
+        ))
+        layout.addWidget(label("Exemples de format : greenhouse:acme  ·  lever:acme", "eyebrow"))
+        self.text = QTextEdit()
+        self.text.setPlaceholderText("greenhouse:nom-du-tableau\nlever:nom-du-site")
+        self.text.setPlainText("\n".join(sources))
+        layout.addWidget(self.text, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Enregistrer les sources")
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _save(self):
+        lines = [line.strip() for line in self.text.toPlainText().splitlines() if line.strip()]
+        try:
+            from .sources import parse_source_spec
+            for line in lines:
+                parse_source_spec(line)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Format de source invalide", str(exc))
+            return
+        self.sources = lines
+        self.accept()
+
+
 class JobFounderWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -144,14 +196,30 @@ class JobFounderWindow(QMainWindow):
         self.setMinimumSize(1120, 720)
         self.profile = {}
         self.analysis_worker = None
-        self.statuses = {j["title"]: j["state"] for j in JOBS}
+        self.search_worker = None
+        self.jobs = [dict(job) for job in JOBS]
+        self.source_config = Path.home() / ".config" / "job-founder" / "sources.json"
+        self.source_lines = self._load_source_config()
+        self.statuses = {j["title"]: j["state"] for j in self.jobs}
         self.active_filter = "Toutes les offres"
-        self.selected_job = JOBS[0]
-        self.activity_log = ["Espace de travail prêt · données de démonstration", "Les sources distantes ne sont pas encore connectées"]
+        self.selected_job = self.jobs[0]
+        self.activity_log = ["Espace de travail prêt · exemples de démonstration", "Configurez une source carrière officielle pour rechercher"]
         self.setAcceptDrops(True)
         self._build()
         self._populate_table()
         self._show_detail(self.selected_job)
+
+    def _load_source_config(self):
+        try:
+            data = json.loads(self.source_config.read_text(encoding="utf-8"))
+            lines = data.get("sources", [])
+            return [str(line) for line in lines if isinstance(line, str)]
+        except (OSError, ValueError, TypeError):
+            return []
+
+    def _save_source_config(self):
+        self.source_config.parent.mkdir(parents=True, exist_ok=True)
+        self.source_config.write_text(json.dumps({"sources": self.source_lines}, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _build(self):
         root = QWidget()
@@ -229,7 +297,8 @@ class JobFounderWindow(QMainWindow):
         head = QHBoxLayout()
         title_col = QVBoxLayout()
         title_col.addWidget(label("Offres d’emploi", "pageTitle"))
-        title_col.addWidget(label("Données fictives pour la démonstration · aucune offre réelle chargée", "muted"))
+        self.data_mode_label = label("Données fictives pour la démonstration · aucune offre réelle chargée", "muted")
+        title_col.addWidget(self.data_mode_label)
         head.addLayout(title_col)
         head.addStretch()
         self.import_button = QPushButton("＋  Importer un CV")
@@ -335,7 +404,7 @@ class JobFounderWindow(QMainWindow):
         self.score_value = label("89", "pageTitle")
         self.score_value.setStyleSheet("font-size:29px;font-weight:800;color:#2769e8")
         sb.addWidget(self.score_value)
-        sb.addWidget(label("/100  ·  score explicable\nCompétences, lieu, expérience, fraîcheur", "muted"))
+        sb.addWidget(label("/100  ·  score indicatif\nCompétences déclarées dans le profil", "muted"))
         sb.addStretch()
         layout.addWidget(scorebox)
         layout.addWidget(label("RÉSUMÉ", "eyebrow"))
@@ -396,14 +465,15 @@ class JobFounderWindow(QMainWindow):
         radius = self.radius_filter.value() if hasattr(self, "radius_filter") else 250
         remote_allowed = {cb.text(): cb.isChecked() for cb in self.remote_checks} if hasattr(self, "remote_checks") else {}
         visible = []
-        for job in JOBS:
+        for job in self.jobs:
             searchable = " ".join([job["title"], job["company"], job["city"], *job["skills"]]).lower()
             if text and text not in searchable: continue
             if job["score"] < minimum: continue
             if contract != "Tous contrats" and job["contract"] != contract: continue
             if city and city not in job["city"].lower(): continue
-            distance = int(re.search(r"\d+", job["distance"]).group())
-            if distance > radius and job["remote"] != "Télétravail": continue
+            distance_match = re.search(r"\d+", job["distance"])
+            distance = int(distance_match.group()) if distance_match else None
+            if distance is not None and distance > radius and job["remote"] != "Télétravail": continue
             if remote_allowed and not remote_allowed.get(job["remote"], True): continue
             if self.active_filter == "Blocages" and not job["issues"]: continue
             if self.active_filter == "Dossiers prêts" and self.statuses.get(job["title"], job["state"]) != "Dossier prêt": continue
@@ -426,15 +496,15 @@ class JobFounderWindow(QMainWindow):
             self.detail_title.setText("Aucune offre pour ces filtres")
             self.detail_company.setText("Modifiez les critères ou relancez la recherche.")
         self.offer_count.setText(f"{len(visible)} offres")
-        self.issue_count.setText(f"{sum(bool(j['issues']) for j in JOBS)} blocages")
-        ready = sum(self.statuses.get(j["title"], j["state"]) == "Dossier prêt" for j in JOBS)
+        self.issue_count.setText(f"{sum(bool(j['issues']) for j in self.jobs)} blocages")
+        ready = sum(self.statuses.get(j["title"], j["state"]) == "Dossier prêt" for j in self.jobs)
         self.packet_count.setText(f"{ready} dossier(s) prêt(s)")
 
     def _selection_changed(self):
         row = self.table.currentRow()
         if row < 0: return
         title = self.table.item(row, 1).data(Qt.ItemDataRole.UserRole)
-        job = next((j for j in JOBS if j["title"] == title), None)
+        job = next((j for j in self.jobs if j["title"] == title), None)
         if job:
             self.selected_job = job
             self._show_detail(job)
@@ -461,6 +531,8 @@ class JobFounderWindow(QMainWindow):
             self._populate_table()
         elif name in ("Blocages", "Dossiers prêts", "Candidatures envoyées"):
             self._populate_table()
+        elif name == "Sources":
+            self.configure_sources()
         else:
             QMessageBox.information(self, name, f"L’écran « {name} » fait partie de la feuille de route du MVP graphique. Les actions sensibles restent sous validation humaine.")
 
@@ -518,28 +590,77 @@ class JobFounderWindow(QMainWindow):
         urls = event.mimeData().urls()
         if urls: self.import_cv(urls[0].toLocalFile())
 
+    def configure_sources(self):
+        dialog = SourcesDialog(self.source_lines, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.source_lines = dialog.sources
+        try:
+            self._save_source_config()
+        except OSError as exc:
+            QMessageBox.warning(self, "Enregistrement impossible", f"Les sources n’ont pas pu être sauvegardées : {exc}")
+            return
+        self._log(f"{len(self.source_lines)} source(s) officielle(s) configurée(s)")
+        QMessageBox.information(self, "Sources enregistrées", "Les identifiants sont enregistrés localement. Cliquez sur Rechercher pour interroger les tableaux publics Greenhouse/Lever configurés.")
+
     def search(self):
         if not self.profile:
             answer = QMessageBox.question(self, "Profil requis", "Importez et confirmez votre CV avant de lancer une recherche. Voulez-vous importer un CV maintenant ?")
             if answer == QMessageBox.StandardButton.Yes: self.import_cv()
             return
+        if self.search_worker and self.search_worker.isRunning():
+            return
+        if not self.source_lines:
+            QMessageBox.information(self, "Configurez une source", "Ajoutez les identifiants des pages carrières officielles dans Sources avant de lancer la recherche.")
+            self.configure_sources()
+            return
         self.search_button.setEnabled(False)
         self.search_button.setText("Recherche…")
-        self._log("Préparation de la recherche · sources réelles non connectées dans ce prototype")
-        QTimer.singleShot(1200, self._finish_search)
+        self._log(f"Interrogation de {len(self.source_lines)} source(s) officielle(s)")
+        worker = SearchWorker(self.source_lines, dict(self.profile), self)
+        self.search_worker = worker
+        worker.completed.connect(self._search_done)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
-    def _finish_search(self):
+    def _search_done(self, jobs, errors):
+        self.search_worker = None
         self.search_button.setEnabled(True)
         self.search_button.setText("⌕  Rechercher")
-        self._log("Démonstration terminée · aucune requête externe n’a été envoyée")
-        QMessageBox.information(self, "Recherche prête à configurer", "Le profil de recherche est confirmé. La connexion aux sources autorisées n’est pas encore implémentée ; les offres affichées restent des exemples fictifs.")
+        city = str(self.profile.get("city", "")).strip().casefold()
+        if city:
+            jobs = [job for job in jobs if city in job["city"].casefold() or job["remote"] == "Télétravail"]
+        self.jobs = jobs
+        self.statuses = {job["title"]: job["state"] for job in jobs}
+        if jobs:
+            self.selected_job = jobs[0]
+            self.active_filter = "Toutes les offres"
+            self.data_mode_label.setText(f"{len(jobs)} offre(s) récupérée(s) depuis les API de pages carrières officielles · distance non géocodée")
+            self._log(f"Recherche terminée · {len(jobs)} offre(s) trouvée(s)")
+            self._populate_table()
+            self._show_detail(self.selected_job)
+        else:
+            self.data_mode_label.setText("Aucune offre réelle pour les sources et la ville configurées")
+            self._populate_table()
+            self._log("Recherche terminée · aucune offre correspondante")
+        if errors:
+            QMessageBox.warning(self, "Certaines sources ont échoué", "\n".join(errors[:10]))
+        elif not jobs:
+            QMessageBox.information(self, "Aucun résultat", "Aucune offre ne correspond à la ville confirmée dans les tableaux configurés. Vérifiez les identifiants des sources ou ajustez la ville.")
 
     def copy_link(self):
         QApplication.clipboard().setText(self.selected_job["link"])
         self._log("Lien exact copié dans le presse-papiers")
 
     def open_job(self):
-        QMessageBox.information(self, "Offre de démonstration", f"Lien fictif :\n{self.selected_job['link']}\n\nLes données de démonstration ne renvoient pas vers une offre réelle.")
+        if not self.selected_job.get("is_demo", True):
+            opened = QDesktopServices.openUrl(QUrl(self.selected_job["link"]))
+            if opened:
+                self._log("Offre ouverte dans le navigateur par défaut")
+            else:
+                QMessageBox.warning(self, "Ouverture impossible", "Le navigateur par défaut n’a pas pu ouvrir cette offre.")
+            return
+        QMessageBox.information(self, "Offre de démonstration", f"Lien fictif :\n{self.selected_job['link']}\n\nConfigurez une source officielle et lancez une recherche pour obtenir des offres réelles.")
 
     def analyze_page(self):
         if self.analysis_worker and self.analysis_worker.isRunning():

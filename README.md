@@ -2,7 +2,7 @@
 
 **Assistant graphique de recherche d’emploi pour Linux.** Importez votre CV, confirmez votre profil, examinez les offres et préparez vos candidatures depuis une seule interface de bureau.
 
-> **État : prototype MVP.** L’interface et le diagnostic de pages sont en cours de développement. Les annonces affichées sont fictives ; aucune recherche d’emploi réelle ni collecte auprès de sources n’est encore intégrée.
+> **État : prototype MVP.** La recherche peut maintenant interroger des tableaux publics de carrières Greenhouse et Lever configurés par l’utilisateur. Les annonces visibles au premier lancement restent fictives jusqu’à la configuration d’au moins une source.
 
 ## Aperçu du prototype
 
@@ -11,12 +11,13 @@ L’application PySide6 est organisée comme un centre de contrôle : navigation
 Fonctionnalités disponibles dans ce prototype :
 
 - Import local de CV PDF, DOCX ou TXT et formulaire de vérification du profil et de la ville.
-- Offres de démonstration filtrables par texte, score, contrat, localisation, rayon et mode de travail.
+- Configuration graphique de tableaux carrières Greenhouse/Lever publics ; interrogation en arrière-plan, normalisation et déduplication des offres, filtrées selon la ville confirmée.
+- Offres de démonstration au premier lancement, puis offres récupérées depuis les sources configurées ; filtres par texte, score, contrat, localisation et mode de travail.
 - Panneau de détails avec compétences, score, état, lien et points à vérifier.
 - Analyse à la demande d’une page avec Playwright : détection du type de site, du lien de candidature, des champs requis, des formulaires à étapes, et de certains blocages.
 - Préparation locale d’un dossier exemple dans `~/Candidatures` et suivi manuel des offres.
 
-**Les liens et annonces actuels sont des exemples fictifs (`example.org`).** Le bouton de recherche n’interroge pas encore de sources réelles. Pour utiliser l’analyse Playwright sur des offres réelles, il faudra d’abord connecter des sources autorisées.
+Au premier lancement, les liens sont fictifs (`example.org`). Pour activer une recherche réelle : ouvrez **Sources**, ajoutez une ligne par tableau de carrières, puis cliquez sur **Rechercher**. Formats acceptés : `greenhouse:identifiant-du-tableau` et `lever:identifiant-du-site` (le slug de l’employeur dans l’URL officielle, par exemple `boards.greenhouse.io/acme` → `greenhouse:acme`, ou `jobs.lever.co/acme` → `lever:acme`). Les connecteurs interrogent uniquement les API publiques de ces fournisseurs, sans scraping générique ni identifiants de connexion. La distance n’est pas géocodée dans ce MVP et reste inconnue ; le filtrage par rayon ne peut donc pas calculer une distance réelle. Le score actuel est indicatif et basé sur les compétences saisies dans le profil.
 
 ## Installation pour le développement
 
@@ -53,13 +54,14 @@ Le lancement de l’interface nécessite les bibliothèques graphiques Qt/OpenGL
 ## Architecture actuelle
 
 - `job_founder/app.py` — fenêtre principale PySide6 et interactions graphiques.
+- `job_founder/sources.py` — connecteurs d’API Greenhouse et Lever, normalisation et score par compétences.
 - `job_founder/navigation.py` — diagnostic des pages et adaptateur Playwright.
-- `tests/test_navigation.py` — tests unitaires des classifications et blocages.
+- `tests/` — tests unitaires des sources, classifications et blocages.
 
 ## Prochaines étapes
 
-1. Connecter des sources d’offres autorisées et remplacer les annonces fictives.
-2. Persister profil, offres, blocages et historique dans SQLite.
-3. Améliorer l’extraction structurée du CV et le score explicable.
-4. Étendre les adaptateurs de sites, l’assistance humaine et la génération de documents.
-5. Préparer le packaging Linux (AppImage/Flatpak) et les mises à jour.
+1. Ajouter d’autres API officielles et des tests d’intégration contrôlés.
+2. Géocoder les lieux pour calculer distance et rayon correctement.
+3. Persister profil, offres, blocages et historique dans SQLite.
+4. Améliorer l’extraction structurée du CV et le score explicable.
+5. Préparer le packaging Linux (AppImage/Flatpak), Chromium et les mises à jour.
